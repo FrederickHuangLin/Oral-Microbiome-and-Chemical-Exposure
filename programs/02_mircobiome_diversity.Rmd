@@ -1,0 +1,542 @@
+---
+title: "Alpha/Beta Diversities"
+author: 
+  - Huang Lin$^1$
+  - $^1$NICHD, 6710B Rockledge Drive, Bethesda, MD 20892
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, 
+                      message = FALSE, comment = NA,
+                      fig.width = 6.25, fig.height = 5)
+
+library(readr)
+library(openxlsx)
+library(tidyverse) 
+library(microbiome)
+library(vegan)
+library(compositions)
+library(magrittr)
+library(qwraps2)
+library(ggpubr)
+```
+
+```{r data}
+# OTU table
+otu_table = read_tsv("../data/table-l7.txt", skip = 1)
+otu_table = otu_table %>% 
+  dplyr::select(-taxonomy)
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE)
+rownames(otu_table) = otu_id
+
+# Taxonomy table
+tax = data.frame(Taxon = otu_id)
+rownames(tax) = otu_id
+tax = tax %>%
+  separate(col = Taxon, 
+           into = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Meta data
+meta_data = read.xlsx("../data/metadata.xlsx", sheet = 1, colNames = TRUE)
+meta_data = meta_data %>%
+  transmute(sampleid = Sample.ID, gender = gender, antibiotics,
+            age = as.numeric(AGE), 
+            age_group = ifelse(adult == 0, "Adolescent", "Adult"),
+            bmi = as.numeric(cd2o) / (as.numeric(cd1o) / 100)^2,
+            edu = as.character(educationo),
+            time_urine = as.numeric(time_urine), batch = New2019, smoke = smoke,
+            DCP24_SG = as.numeric(DCP24_SG),
+            BP3_SG = as.numeric(BP3_SG), BPA_SG = as.numeric(BPA_SG),
+            BPF_SG = as.numeric(BPF_SG), BPS_SG = as.numeric(BPS_SG),
+            EPB_SG = as.numeric(EPB_SG), PBP_SG = as.numeric(PBP_SG),
+            MPB_SG = as.numeric(MPB_SG), parabensum_SG = as.numeric(parabensum_mol),
+            DCP25 = ifelse(belowDCP25 == 0, "Above LOD", "Below LOD"),
+            B_PB = ifelse(belowB_PB == 0, "Above LOD", "Below LOD"), 
+            TCC = ifelse(belowTCC == 0, "Above LOD", "Below LOD"),
+            TCS = ifelse(belowTCS == 0, "Above LOD", "Below LOD"))
+rownames(meta_data) = meta_data$sampleid
+meta_data$gender = recode(meta_data$gender, 'female' = "Female", `male` = "Male")
+meta_data$DCP25 = factor(meta_data$DCP25, levels = c("Below LOD", "Above LOD"))
+meta_data$B_PB = factor(meta_data$B_PB, levels = c("Below LOD", "Above LOD"))
+meta_data$TCC = factor(meta_data$TCC, levels = c("Below LOD", "Above LOD"))
+meta_data$TCS = factor(meta_data$TCS, levels = c("Below LOD", "Above LOD"))
+
+# Combine them into a phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META)
+# Exclude all participants who have used antibiotics in the last four weeks
+otu_data = subset_samples(otu_data, antibiotics != "last4weeks")
+
+# Split by age
+otu_data1 = subset_samples(otu_data, age_group == "Adult")
+otu_data2 = subset_samples(otu_data, age_group == "Adolescent")
+
+# Adults
+meta_data1 = meta(otu_data1)
+meta_data1 = meta_data1 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data1) = meta_data1$sampleid
+meta_data1 = meta_data1 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data1 = phyloseq(otu_table(otu_data1), 
+                     tax_table(otu_data1), 
+                     sample_data(meta_data1))
+
+# Adolescents
+meta_data2 = meta(otu_data2)
+meta_data2 = meta_data2 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data2) = meta_data2$sampleid
+meta_data2 = meta_data2 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data2 = phyloseq(otu_table(otu_data2), 
+                     tax_table(otu_data2), 
+                     sample_data(meta_data2))
+```
+
+# 2. Alpha diversity: Shannon’s diversity index
+
+1. For the adult population.
+
+2. P-value is obtained by Wilcoxon Rank Sum Test for alpha diversities.
+
+```{r}
+# Aggregate taxa
+genus_data1 = aggregate_taxa(otu_data1, "Genus")
+d_alpha = alpha(genus_data1, index = "diversity_shannon")
+
+df_alpha = data.frame(meta(genus_data1), 
+                      shannon = d_alpha$diversity_shannon)
+```
+
+## 2.1 Main figures
+
+```{r, fig.height=8, fig.width=8}
+my_comparisons = list(c("0", "1"), c("0", "2"), c("0", "3"),
+                      c("1", "2"), c("1", "3"), c("2", "3"))
+p_mpb = df_alpha %>%
+  filter(!is.na(MPB)) %>%
+  ggplot(aes(x = MPB, y = shannon)) + 
+  geom_boxplot(width = 0.5, aes(fill = MPB), alpha = 0.7) +
+  geom_jitter(shape = 16, position = position_jitter(0.2), size = 0.7) + 
+  labs(x = NULL, y = "Shannon diversity index", title = "MPB") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom") +
+  stat_compare_means(comparisons = my_comparisons) +
+      scale_fill_brewer(name = NULL, palette = "Dark2",
+                  label = c("1Q", "2Q", "3Q", "4Q"))
+
+p_ppb = df_alpha %>%
+  filter(!is.na(PBP)) %>%
+  ggplot(aes(x = PBP, y = shannon)) + 
+  geom_boxplot(width = 0.5, aes(fill = PBP), alpha = 0.7) +
+  geom_jitter(shape = 16, position = position_jitter(0.2), size = 0.7) + 
+  labs(x = NULL, y = "Shannon diversity index", title = "PPB") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom") +
+  stat_compare_means(comparisons = my_comparisons) +
+      scale_fill_brewer(name = NULL, palette = "Dark2",
+                  label = c("1Q", "2Q", "3Q", "4Q"))
+
+p_bp3 = df_alpha %>%
+  filter(!is.na(BP3)) %>%
+  ggplot(aes(x = BP3, y = shannon)) + 
+  geom_boxplot(width = 0.5, aes(fill = BP3), alpha = 0.7) +
+  geom_jitter(shape = 16, position = position_jitter(0.2), size = 0.7) + 
+  labs(x = NULL, y = "Shannon diversity index", title = "BP3") + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom") +
+  stat_compare_means(comparisons = my_comparisons) +
+      scale_fill_brewer(name = NULL, palette = "Dark2",
+                  label = c("1Q", "2Q", "3Q", "4Q"))
+
+p_alpha = ggarrange(p_mpb, p_ppb, p_bp3, 
+          labels = c("A", "B", "C"),
+          ncol = 2, nrow = 2, 
+          common.legend = TRUE, legend = "bottom")
+print(p_alpha)
+ggsave(filename = "../figures/main figures/diversity/alpha.jpeg", plot = p_alpha,
+       height = 8, width = 8, units = 'in', dpi = 300)
+ggsave(filename = "../figures/main figures/diversity/alpha.pdf", plot = p_alpha,
+       height = 8, width = 8)
+```
+
+## 2.2 Supplementary figures
+
+```{r, fig.height=5, fig.width=6.25}
+chem_list = c("TCS", "B_PB", "TCC", "DCP25", "EPB", "parabensum", 
+              "DCP24", "BPA", "BPS", "BPF")
+labels = c("TCS", "BPB", "TCC", "2,5-DCP", "EPB", "Combined Parabens", 
+           "2,4-DCP", "BPA", "BPS", "BPF")
+img_path = "../figures/supplementary figures/diversity/"
+
+for (i in chem_list) {
+  cat("\n \n \n")
+  label = labels[which(chem_list == i)]
+  
+  df = df_alpha %>% filter(!is.na(!!as.name(i)))
+  p = ggplot(data = df, aes(x = !!as.name(i), y = shannon)) + 
+    geom_boxplot(width = 0.5, aes(fill = !!as.name(i)), alpha = 0.7) +
+    geom_jitter(shape = 16, position = position_jitter(0.2), size = 0.7) + 
+    labs(x = NULL, y = "Shannon diversity index", title = label) + 
+    theme_bw() + 
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = "bottom")
+  
+  n_level = nlevels(df[, i])
+  if (n_level == 4) {
+    my_comparisons = list(c("0", "1"), c("0", "2"), c("0", "3"),
+                          c("1", "2"), c("1", "3"), c("2", "3"))
+    p = p +
+      stat_compare_means(comparisons = my_comparisons) +
+      scale_fill_brewer(name = NULL, palette = "Dark2",
+                  label = c("1Q", "2Q", "3Q", "4Q"))
+  } else {
+    p = p + stat_compare_means(label.x.npc = 0.5, label.y.npc = 1) +
+      scale_fill_brewer(name = NULL, palette = "Set1")
+  }
+  print(p)
+  cat("\n \n \n")
+  ggsave(paste0(img_path, "alpha_", i, ".jpeg"), plot = p,
+         height = 5, width = 6.25, units = 'in', dpi = 300)
+  ggsave(paste0(img_path, "alpha_", i, ".pdf"), plot = p,
+         height = 5, width = 6.25)
+}
+```
+
+# 3. Beta diversity: Bray-Curtis dissimilarity
+
+1. For the adult population.
+
+2. P-values are obtained by Permutational Multivariate Analysis of Variance (PERMANOVA) and Permutational Analysis of Multivariate Dispersion (PERMDISP) for beta diversities.
+
+## 3.1 Main figures
+
+```{r, fig.height=7, fig.width=9}
+chem_list = c("MPB", "PBP", "parabensum", "DCP24")
+title_labels = c("MPB", "PPB", "Combined Parabens", "2,4-DCP")
+
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+for (i in chem_list) {
+  par(mar = c(1, 5, 4, 2))
+  title_label = title_labels[which(chem_list == i)]
+  panel_label = LETTERS[which(chem_list == i)]
+  
+  pseq = subset_samples(genus_data1, !is.na(get(i)))
+  set.seed(123)
+  # PERMANOVA
+  permanova = adonis(t(abundances(pseq)) ~ get(i), 
+                     data = meta(pseq), 
+                     permutations = 999, method = "bray")$aov.tab
+  
+  # PERMDISP
+  dis = vegdist(t(abundances(pseq)), method = "bray")
+  groups = meta(pseq)[, i]
+  n_level = nlevels(groups)
+  
+  groups = recode(groups, `0` = "1Q", `1` = "2Q", `2` = "3Q", `3` = "4Q")
+  mod = betadisper(d = dis, group = groups, type = "median")
+  p1 = signif(permanova$`Pr(>F)`[1], 2)
+  p2 = signif(permutest(mod)$tab$`Pr(>F)`[1], 2)
+  
+  # Draw the Plot
+  labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+  # brewer.pal(n = 8, name = "Dark2")
+  plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+       main = title_label, xlab = labs[1], ylab = labs[2], 
+       ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+       hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+  axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+  legend(x = 0.2, y = -0.3, cex = 0.7,
+         legend = c(paste0("p (PERMANOVA) = ", p1),
+                    paste0("p (PERMDISP) = ", p2)))
+  mtext(text = panel_label, side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+}
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = .5, horiz = TRUE,
+       legend = c("1Q", "2Q", "3Q", "4Q"), 
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"))
+
+# JPEG
+jpeg(filename = "../figures/main figures/diversity/beta.jpeg", 
+     height = 7, width = 9, res = 300, units = "in")
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+for (i in chem_list) {
+  par(mar = c(1, 5, 4, 2))
+  title_label = title_labels[which(chem_list == i)]
+  panel_label = LETTERS[which(chem_list == i)]
+  
+  pseq = subset_samples(genus_data1, !is.na(get(i)))
+  set.seed(123)
+  # PERMANOVA
+  permanova = adonis(t(abundances(pseq)) ~ get(i), 
+                     data = meta(pseq), 
+                     permutations = 999, method = "bray")$aov.tab
+  
+  # PERMDISP
+  dis = vegdist(t(abundances(pseq)), method = "bray")
+  groups = meta(pseq)[, i]
+  n_level = nlevels(groups)
+  
+  groups = recode(groups, `0` = "1Q", `1` = "2Q", `2` = "3Q", `3` = "4Q")
+  mod = betadisper(d = dis, group = groups, type = "median")
+  p1 = signif(permanova$`Pr(>F)`[1], 2)
+  p2 = signif(permutest(mod)$tab$`Pr(>F)`[1], 2)
+  
+  # Draw the Plot
+  labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+  # brewer.pal(n = 8, name = "Dark2")
+  plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+       main = title_label, xlab = labs[1], ylab = labs[2], 
+       ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+       hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+  axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+  legend(x = 0.2, y = -0.3, cex = 0.7,
+         legend = c(paste0("p (PERMANOVA) = ", p1),
+                    paste0("p (PERMDISP) = ", p2)))
+  mtext(text = panel_label, side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+}
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = .5, horiz = TRUE,
+       legend = c("1Q", "2Q", "3Q", "4Q"), 
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"))
+dev.off()
+
+# PDF
+pdf(file = "../figures/main figures/diversity/beta.pdf", height = 7, width = 9)
+m = matrix(c(1, 2, 3, 4, 5, 5), nrow = 3, ncol = 2, byrow = TRUE)
+layout(mat = m, heights = c(0.45, 0.45, 0.1))
+for (i in chem_list) {
+  par(mar = c(1, 5, 4, 2))
+  title_label = title_labels[which(chem_list == i)]
+  panel_label = LETTERS[which(chem_list == i)]
+  
+  pseq = subset_samples(genus_data1, !is.na(get(i)))
+  set.seed(123)
+  # PERMANOVA
+  permanova = adonis(t(abundances(pseq)) ~ get(i), 
+                     data = meta(pseq), 
+                     permutations = 999, method = "bray")$aov.tab
+  
+  # PERMDISP
+  dis = vegdist(t(abundances(pseq)), method = "bray")
+  groups = meta(pseq)[, i]
+  n_level = nlevels(groups)
+  
+  groups = recode(groups, `0` = "1Q", `1` = "2Q", `2` = "3Q", `3` = "4Q")
+  mod = betadisper(d = dis, group = groups, type = "median")
+  p1 = signif(permanova$`Pr(>F)`[1], 2)
+  p2 = signif(permutest(mod)$tab$`Pr(>F)`[1], 2)
+  
+  # Draw the Plot
+  labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+  # brewer.pal(n = 8, name = "Dark2")
+  plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+       main = title_label, xlab = labs[1], ylab = labs[2], 
+       ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+       hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+  axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+  legend(x = 0.2, y = -0.3, cex = 0.7,
+         legend = c(paste0("p (PERMANOVA) = ", p1),
+                    paste0("p (PERMDISP) = ", p2)))
+  mtext(text = panel_label, side = 3, line = 1.5, cex = 1.5, adj = -0.1)
+}
+par(mar = c(0, 0, 2, 0))
+plot(1, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend(x = "top", inset = 0, lwd = 5, cex = .5, horiz = TRUE,
+       legend = c("1Q", "2Q", "3Q", "4Q"), 
+       col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"))
+dev.off() 
+```
+
+## 3.2 Supplementary figures
+
+```{r, fig.height=5, fig.width=6.25}
+chem_list = c("TCS", "B_PB", "TCC", "DCP25", "EPB", "BP3", "BPA", "BPF", "BPS")
+labels = c("TCS", "BPB", "TCC", "2,5-DCP", "EPB", "BP3", "BPA", "BPF", "BPS")
+img_path = "../figures/supplementary figures/diversity/"
+for (i in chem_list) {
+  cat("\n \n \n")
+  label = labels[which(chem_list == i)]
+  
+  pseq = subset_samples(genus_data1, !is.na(get(i)))
+  set.seed(123)
+  # PERMANOVA
+  permanova = adonis(t(abundances(pseq)) ~ get(i), 
+                     data = meta(pseq), 
+                     permutations = 999, method = "bray")$aov.tab
+  
+  # PERMDISP
+  dis = vegdist(t(abundances(pseq)), method = "bray")
+  groups = meta(pseq)[, i]
+  n_level = nlevels(groups)
+  
+  # Iteration
+  if (n_level == 4) {
+    groups = recode(groups, `0` = "1Q", `1` = "2Q", `2` = "3Q", `3` = "4Q")
+    mod = betadisper(d = dis, group = groups, type = "median")
+    p1 = signif(permanova$`Pr(>F)`[1], 2)
+    p2 = signif(permutest(mod)$tab$`Pr(>F)`[1], 2)
+    
+    # Draw the Plot
+    labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+    # brewer.pal(n = 8, name = "Dark2")
+    plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("1Q", "2Q", "3Q", "4Q"),
+           col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    
+    # Export
+    jpeg(filename = paste0(img_path, "beta_", i, ".jpeg"), 
+         height = 5, width = 6.25, res = 300, units = "in")
+    plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("1Q", "2Q", "3Q", "4Q"),
+           col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    dev.off()
+    
+    pdf(file = paste0(img_path, "beta_", i, ".pdf"), height = 5, width = 6.25)
+    plot(mod, pch = 15:18, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("1Q", "2Q", "3Q", "4Q"),
+           col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    dev.off()
+  } else{
+    mod = betadisper(d = dis, group = groups, type = "median")
+    p1 = signif(permanova$`Pr(>F)`[1], 2)
+    p2 = signif(permutest(mod)$tab$`Pr(>F)`[1], 2)
+    
+    # Draw the Plot
+    labs = paste0("PCoA", 1:2, " (", signif(100 * mod$eig / sum(mod$eig), 3), "%)")
+    # brewer.pal(n = 8, name = "Accent")
+    plot(mod, pch = 15:16, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#E41A1C", "#377EB8"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("Below LOD", "Above LOD"),
+           col = c("#E41A1C", "#377EB8"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    
+    # Export
+    jpeg(filename = paste0(img_path, "beta_", i, ".jpeg"), 
+         height = 5, width = 6.25, res = 300, units = "in")
+    plot(mod, pch = 15:16, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#E41A1C", "#377EB8"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("Below LOD", "Above LOD"),
+           col = c("#E41A1C", "#377EB8"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    dev.off()
+    
+    pdf(file = paste0(img_path, "beta_", i, ".pdf"), height = 5, width = 6.25)
+    plot(mod, pch = 15:16, cex.lab = 1.25, cex = 0.7, label.cex = 0.6, 
+         main = label, xlab = labs[1], ylab = labs[2], 
+         ylim = c(-0.5, 0.5), xlim = c(-0.6, 0.6), xaxt = "n",
+         col = c("#E41A1C", "#377EB8"), sub = NULL,
+         hull = FALSE, ellipse = TRUE, conf = 0.68) # 68% data coverage for data ellipses
+    axis(1, at = round(seq(-0.6, 0.6, by = 0.2), 1), las = 1)
+    legend(0.5, 0.4, legend = c("Below LOD", "Above LOD"),
+           col = c("#E41A1C", "#377EB8"), 
+           pch = 15:16, cex = 0.8)
+    legend(x = 0.2, y = -0.3, cex = 0.7,
+           legend = c(paste0("p (PERMANOVA) = ", p1),
+                      paste0("p (PERMDISP) = ", p2)))
+    dev.off()
+  }
+}
+```
+
+# Session information
+
+```{r, message_group=FALSE, warning=FALSE, comment=NA}
+sessionInfo()
+```
+

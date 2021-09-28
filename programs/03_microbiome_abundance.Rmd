@@ -1,0 +1,737 @@
+---
+title: "Differential Abundance Analysis"
+author: 
+  - Huang Lin$^1$
+  - $^1$NICHD, 6710B Rockledge Drive, Bethesda, MD 20892
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, 
+                      message=FALSE, comment=NA, 
+                      fig.width = 8, fig.height = 8)
+
+library(readr)
+library(openxlsx)
+library(tidyverse) 
+library(microbiome)
+library(vegan)
+library(compositions)
+library(magrittr)
+library(qwraps2)
+library(knitr)
+library(RColorBrewer)
+library(ggpubr)
+
+source("../programs/00_ancom_bc.R")
+```
+
+```{r data}
+# OTU table
+otu_table = read_tsv("../data/table-l7.txt", skip = 1)
+otu_table = otu_table %>% 
+  dplyr::select(-taxonomy)
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE)
+rownames(otu_table) = otu_id
+
+# Taxonomy table
+tax = data.frame(Taxon = otu_id)
+rownames(tax) = otu_id
+tax = tax %>%
+  separate(col = Taxon, 
+           into = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Meta data
+meta_data = read.xlsx("../data/metadata.xlsx", sheet = 1, colNames = TRUE)
+meta_data = meta_data %>%
+  transmute(sampleid = Sample.ID, gender = gender, antibiotics,
+            age = as.numeric(AGE), 
+            age_group = ifelse(adult == 0, "Adolescent", "Adult"),
+            bmi = as.numeric(cd2o) / (as.numeric(cd1o) / 100)^2,
+            edu = as.character(educationo),
+            time_urine = as.numeric(time_urine), batch = New2019, smoke = smoke,
+            DCP24_SG = as.numeric(DCP24_SG),
+            BP3_SG = as.numeric(BP3_SG), BPA_SG = as.numeric(BPA_SG),
+            BPF_SG = as.numeric(BPF_SG), BPS_SG = as.numeric(BPS_SG),
+            EPB_SG = as.numeric(EPB_SG), PBP_SG = as.numeric(PBP_SG),
+            MPB_SG = as.numeric(MPB_SG), parabensum_SG = as.numeric(parabensum_mol),
+            DCP25 = ifelse(belowDCP25 == 0, "Above LOD", "Below LOD"),
+            B_PB = ifelse(belowB_PB == 0, "Above LOD", "Below LOD"), 
+            TCC = ifelse(belowTCC == 0, "Above LOD", "Below LOD"),
+            TCS = ifelse(belowTCS == 0, "Above LOD", "Below LOD"))
+rownames(meta_data) = meta_data$sampleid
+meta_data$gender = recode(meta_data$gender, 'female' = "Female", `male` = "Male")
+meta_data$DCP25 = factor(meta_data$DCP25, levels = c("Below LOD", "Above LOD"))
+meta_data$B_PB = factor(meta_data$B_PB, levels = c("Below LOD", "Above LOD"))
+meta_data$TCC = factor(meta_data$TCC, levels = c("Below LOD", "Above LOD"))
+meta_data$TCS = factor(meta_data$TCS, levels = c("Below LOD", "Above LOD"))
+
+# Combine them into a phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META)
+# Exclude all participants who have used antibiotics in the last four weeks
+otu_data = subset_samples(otu_data, antibiotics != "last4weeks")
+
+# Split by age
+otu_data1 = subset_samples(otu_data, age_group == "Adult")
+otu_data2 = subset_samples(otu_data, age_group == "Adolescent")
+
+# Adults
+meta_data1 = meta(otu_data1)
+meta_data1 = meta_data1 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data1) = meta_data1$sampleid
+meta_data1 = meta_data1 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data1 = phyloseq(otu_table(otu_data1), 
+                     tax_table(otu_data1), 
+                     sample_data(meta_data1))
+
+# Adolescents
+meta_data2 = meta(otu_data2)
+meta_data2 = meta_data2 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data2) = meta_data2$sampleid
+meta_data2 = meta_data2 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data2 = phyloseq(otu_table(otu_data2), 
+                     tax_table(otu_data2), 
+                     sample_data(meta_data2))
+```
+
+```{r function1}
+two_group_pipeline = function(pseq, sample_id, adj_formula, group, p_adj_method, 
+                              zero_cut, lib_cut, neg_lb, alpha){
+  feature_table = abundances(pseq); meta_data = meta(pseq)
+  struc_zero = TRUE; tol = 1e-5; max_iter = 100; conserve = FALSE; per_num = 1000
+  global = FALSE; direct = FALSE; dunnett = FALSE; pattern = NULL
+  out = ANCOM_BC(feature_table, meta_data, sample_id, adj_formula, p_adj_method, 
+                 zero_cut, lib_cut, struc_zero, neg_lb, group, 
+                 tol, max_iter, conserve, alpha, per_num,
+                 global, direct, dunnett, pattern)
+  res = out$res
+  
+  # Waterfall plot
+  res_beta = data.frame(res$beta * res$diff_abn, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_se = data.frame(res$se * res$diff_abn, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  res_q = data.frame(res$q * res$diff_abn, check.names = FALSE) %>% 
+    rownames_to_column("taxon_id")
+  colnames(res_se)[-1] = paste0(colnames(res_se)[-1], "SD")
+  colnames(res_q)[-1] = paste0(colnames(res_q)[-1], "P")
+  res_zero = out$zero_ind[[1]]
+  res_zero = apply(res_zero, 1, function(x) if_else(any(x == 1), 1, 0))
+  res_zero = data.frame(struc_zero = res_zero) %>% rownames_to_column("taxon_id")
+  res_model = res_beta %>% 
+    left_join(res_se, by = "taxon_id") %>%
+    left_join(res_q, by = "taxon_id") %>%
+    left_join(res_zero, by = "taxon_id") %>%
+    dplyr::select(-matches("Intercept"))
+  colnames(res_model)[grepl(group, colnames(res_model))] = c(group, 
+                                                             paste0(group, "SD"), 
+                                                             paste0(group, "P"))
+
+  df_fig = res_model %>%
+    filter(!!as.name(group) != 0) %>% 
+    arrange(desc(!!as.name(group))) %>%
+    mutate(SD = if_else(struc_zero == 1, 0, 
+                        !!as.name(paste0(group, "SD"))),
+           type = if_else(!!as.name(group) > 0, "g1", "g2"),
+           star = case_when(!!as.name(paste0(group, "P")) < .001 ~ "***",
+                            !!as.name(paste0(group, "P")) < .01 ~ "**",
+                            TRUE ~ "*"),
+           pos = if_else(type == "g1", 
+                         !!as.name(group) + !!as.name(paste0(group, "SD")) + 0.2,
+                         !!as.name(group) - !!as.name(paste0(group, "SD")) - 0.2),
+           constant = "A"
+           )
+  df_fig$type = factor(df_fig$type, levels = c("g1", "g2"))
+  df_fig$taxon_id = factor(df_fig$taxon_id, levels = df_fig$taxon_id)
+  df_fig$struc_zero = factor(df_fig$struc_zero, levels = c(0, 1))
+  
+  if (nrow(df_fig) != 0) {
+    p_waterfall = df_fig %>%
+      ggplot(aes(x = taxon_id, y = !!as.name(group), 
+                 fill = constant, color = constant)) + 
+      geom_bar(stat = "identity", width = 0.7, 
+               position = position_dodge(width = 0.4)) +
+      geom_errorbar(aes(ymin = !!as.name(group) - SD, 
+                        ymax = !!as.name(group) + SD), 
+                    width = 0.2,
+                    position = position_dodge(0.05), color = "black") + 
+      geom_text(aes(y = pos, label = star), 
+                vjust = .7, color = "black", position = position_dodge(width = 0.05)) +
+      labs(x = NULL, y = "Log fold change") +
+      scale_x_discrete(drop = FALSE) +
+      scale_fill_manual(drop = FALSE, name = NULL, 
+                        values = "#2166AC",
+                        label = c("Above LOD - Below LOD")) +
+      scale_color_manual(drop = FALSE, name = NULL, 
+                         values = "#2166AC", guide = "none") +
+      theme_bw() + 
+      theme(panel.grid.minor.y = element_blank(),
+            axis.text.x = element_text(angle = 60, hjust = 1))
+  } else {p_waterfall = NULL}
+  
+  # Results summary
+  res_out = data.frame(beta = res$beta[, -1], se = res$se[, -1], W = res$W[, -1], 
+                       p = res$p_val[, -1], q = res$q_val[, -1], check.names = FALSE) %>%
+    rownames_to_column("taxon_id")
+  
+  res_zero = out$zero_ind[[1]]
+  res_zero[res_zero == 1] = "Yes"
+  res_zero[res_zero == 0] = "No"
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% rownames_to_column("taxon_id")
+  res_out = res_out %>% left_join(res_zero, by = "taxon_id")
+  
+  obj = list(p_waterfall = p_waterfall, out = res_out)
+  return(obj)
+}
+```
+
+```{r function2}
+multi_group_pipeline = function(pseq, sample_id, adj_formula, group, p_adj_method, 
+                                zero_cut, lib_cut, neg_lb, alpha, dunnett){
+  feature_table = abundances(pseq); meta_data = meta(pseq)
+  struc_zero = TRUE; tol = 1e-5; max_iter = 100; conserve = FALSE
+  per_num = 1000; global = TRUE; direct = TRUE; pattern = NULL
+  out = ANCOM_BC(feature_table, meta_data, sample_id, adj_formula, p_adj_method, 
+                 zero_cut, lib_cut, struc_zero, neg_lb, group, 
+                 tol, max_iter, conserve, alpha, per_num,
+                 global, direct, dunnett, pattern)
+  # Global test
+  out_global = out$res_global
+  res_global = data.frame(out_global$W, out_global$p_val, out_global$q_val)
+  colnames(res_global) = c("W.global", "p.global", "q.global")
+  
+  # Directional test
+  out_direct = out$res_direct
+  res_direct = data.frame(beta = out_direct$beta, se = out_direct$se, 
+                          W = out_direct$W, p = out_direct$p_val, 
+                          q = out_direct$q_val, check.names = FALSE) %>%
+    rownames_to_column("taxon_id")
+  # For Dunnet's type of test
+  res_zero = out$zero_ind[[1]]
+  zero_mask = 1 - (res_zero[, -1] - res_zero[, 1])
+  zero_mask[zero_mask == 2] = 0
+  zero_mask[zero_mask == 0] = (-1) # For the purpose of plotting
+  
+  # Barplot
+  sig_taxa = out_direct$p_val
+  sig_taxa = data.frame(sig_taxa < alpha)
+  sig_taxa$sig_ind = rowSums(sig_taxa)
+  sig_taxa = sig_taxa %>% 
+    rownames_to_column("taxon_id") %>% 
+    filter(sig_ind > 0) %>% 
+    .$taxon_id
+  
+  if (length(sig_taxa) == 0) {
+    p_bar = NULL
+  } else {
+    df_fig1 = data.frame(out_direct$beta) %>% 
+      rownames_to_column("taxon_id")%>% 
+      filter(taxon_id %in% sig_taxa) %>% 
+      gather(key = "group", value = "beta", -1)
+    df_fig2 = data.frame(out_direct$se) %>% 
+      rownames_to_column("taxon_id")%>% 
+      filter(taxon_id %in% sig_taxa) %>% 
+      gather(key = "group", value = "se", -1)
+    df_fig3 = data.frame(out_direct$p_val * zero_mask) %>% 
+      rownames_to_column("taxon_id")%>% 
+      filter(taxon_id %in% sig_taxa) %>% 
+      gather(key = "group", value = "p", -1)
+    df_fig = df_fig1 %>% left_join(df_fig2) %>% left_join(df_fig3) %>%
+      mutate(struc_zero = if_else(p < 0, 1, 0),
+             se = if_else(struc_zero == 1, 0, se), 
+             ci_lo = beta - se, ci_up = beta + se,
+             star = case_when(p < 0.001 ~ "***",
+                              p < 0.01 ~ "**",
+                              p < 0.05 ~ "*",
+                              p >= 0.05 ~ ""))
+    
+    p_bar = df_fig %>% ggplot(aes(x = taxon_id, y = beta, 
+                                   ymin = ci_lo, ymax = ci_up, 
+                                   group = factor(group))) + 
+      geom_bar(aes(fill = group), stat = "identity", width = 0.4, 
+               position = position_dodge(), color = "black") +
+      geom_errorbar(width = 0.2, size = 0.25, 
+                    position = position_dodge(width = 0.4)) +
+      geom_abline(slope = 0, intercept = 0, linetype = "dashed", alpha = 0.5) +
+      labs(x = NULL, y = "Log Fold Change") + coord_flip() +
+      scale_fill_manual(name = NULL,
+                        label = c("2Q - 1Q", "3Q - 1Q", "4Q - 1Q"),
+                        values = c("#D95F02", "#7570B3", "#E7298A")) +
+      scale_x_discrete(limits = rev(levels(df_fig$taxon_id))) +
+      theme_bw() +
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            legend.position = "bottom") +
+      geom_text(aes(y = beta + 1.5 * sign(beta), label = star), 
+                vjust = .7, color = "black", position = position_dodge(width = 0.5))
+    p_bar = p_bar + 
+      geom_point(data = df_fig, 
+                 aes(x = taxon_id, y = beta, shape = factor(struc_zero)),
+                 position = position_dodge(width = 0.4)) +
+      scale_shape_manual(values = c(NA, 18), guide = "none")
+  }
+
+  # Results summary
+  res_out = cbind(res_direct, res_global)
+  res_zero[res_zero == 1] = "Yes"
+  res_zero[res_zero == 0] = "No"
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% rownames_to_column("taxon_id")
+  res_out = res_out %>% left_join(res_zero, by = "taxon_id")
+  
+  obj = list(p_bar = p_bar, out = res_out)
+  return(obj)
+}
+```
+
+```{r function3}
+trend_pipeline = function(pseq, sample_id, adj_formula, group, p_adj_method, 
+                          zero_cut, lib_cut, neg_lb, alpha, dunnett, pattern){
+  feature_table = abundances(pseq); meta_data = meta(pseq)
+  struc_zero = TRUE; tol = 1e-5; max_iter = 100
+  conserve = FALSE; per_num = 1000; global = TRUE; direct = TRUE
+  out = ANCOM_BC(feature_table, meta_data, sample_id, adj_formula, p_adj_method, 
+                 zero_cut, lib_cut, struc_zero, neg_lb, group, 
+                 tol, max_iter, conserve, alpha, per_num,
+                 global, direct, dunnett, pattern)
+  
+  # Trend test
+  res_zero = out$zero_ind[[1]]
+  
+  out_trend = out$res_pattern
+  res_trend = data.frame(out_trend$beta, W = out_trend$W[, 1], 
+                         p = out_trend$p_val[, 1], q = out_trend$q_val[, 1], 
+                         pattern = out_trend$node[, 1], check.names = FALSE) 
+  res_trend = cbind(0, res_trend)
+  level = levels(meta(pseq)[, group])
+  colnames(res_trend)[1:length(level)] = paste0(group, level)
+  res_trend = res_trend %>% rownames_to_column("taxon_id")
+  
+  # Barplot
+  sig_taxa = res_trend %>% filter(q < alpha) %>% .$taxon_id
+  if (length(sig_taxa) == 0) {
+    p_bar = NULL
+  } else {
+    df_fig1 = res_trend %>% 
+      gather(key = "group", value = "beta", paste0(group, level))
+    df_fig2 = data.frame(res_zero, check.names = FALSE) %>% 
+      rownames_to_column("taxon_id")
+    colnames(df_fig2) = c("taxon_id", paste0(group, level))
+    df_fig2 = df_fig2 %>% 
+      gather(key = "group", value = "struc_zero", paste0(group, level))
+    
+    df_fig = df_fig1 %>% left_join(df_fig2) %>% filter(q < alpha) %>%
+      mutate(star = case_when(q < 0.001 ~ "***",
+                              q < 0.01 ~ "**",
+                              q < 0.05 ~ "*",
+                              q >= 0.05 ~ ""))
+    df_label = df_fig %>% group_by(taxon_id) %>% 
+      summarise(y = beta[which.max(abs(beta))], star = unique(star))
+    
+    p_bar = df_fig %>% 
+      ggplot(aes(x = taxon_id, y = beta, group = factor(group))) + 
+      geom_bar(aes(fill = group), stat= "identity", width = 0.4, 
+               position = position_dodge(), color = "black") +
+      geom_abline(slope = 0, intercept = 0, linetype = "dashed", alpha = 0.5) +
+      labs(x = NULL, y = "Log Fold Change") + coord_flip() +
+      scale_fill_brewer(name = NULL,
+                        label = c("1Q = 0", "2Q", "3Q", "4Q"),
+                        palette = "Dark2") +
+      scale_x_discrete(limits = rev(levels(df_fig$taxon_id))) +
+      theme_bw() +
+      guides(color = "none") + 
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            legend.position = "bottom") +
+      geom_text(data = df_label, aes(y = 1.5 * y, label = star), vjust = .7, color = "black")
+    p_bar = p_bar + 
+      geom_point(data = df_fig, 
+                 aes(x = taxon_id, y = beta, shape = factor(struc_zero)),
+                 position = position_dodge(width = 0.4)) +
+      scale_shape_manual(values = c(NA, 18), guide = "none")
+  }
+
+  # Results summary
+  res_zero[res_zero == 1] = "Yes"
+  res_zero[res_zero == 0] = "No"
+  res_zero = data.frame(res_zero, check.names = FALSE) %>% rownames_to_column("taxon_id")
+  res_out = res_trend  %>% left_join(res_zero, by = "taxon_id")
+  
+  obj = list(p_bar = p_bar, out = res_out)
+  return(obj)
+}
+```
+
+# 1. Main figures
+
+1. For the adult population.
+
+2. Focus on pairwise directional/two-group test at genus level.
+
+3. P-values were adjusted by BH procedure.
+
+4. The following chemicals (EPB, PPB, BPA, 2,4-DCP, BPB, TCC) have genera that are differentially abundant.
+
+```{r, results='asis', fig.height=12, fig.width=10}
+pseq = aggregate_taxa(otu_data1, "Genus")
+sample_id = "sampleid"
+cov_formula = "smoke + time_urine + age + bmi"
+p_adj_method = "BH"; zero_cut = 0.90; lib_cut = 1000;  neg_lb = TRUE
+alpha = 0.05; dunnett = TRUE; pattern = "simple"
+
+# EPB
+adj_formula = paste("EPB", cov_formula, sep = " + ")
+group = "EPB"
+label = "EPB"
+obj = multi_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                           zero_cut, lib_cut, neg_lb, alpha, dunnett)
+out = obj$out
+colnames(out) = c("taxon_id", 
+                  "LFC (2Q - 1Q)", "LFC (3Q - 1Q)", "LFC (4Q - 1Q)", 
+                  "SE (2Q - 1Q)", "SE (3Q - 1Q)", "SE (4Q - 1Q)",
+                  "W (2Q - 1Q)", "W (3Q - 1Q)", "W (4Q - 1Q)",
+                  "p (2Q - 1Q)", "p (3Q - 1Q)", "p (4Q - 1Q)",
+                  "q (2Q - 1Q)", "q (3Q - 1Q)", "q (4Q - 1Q)",
+                  "W.global", "p.global", "q.global",
+                  "structural_zero (1Q)", "structural_zero (2Q)",
+                  "structural_zero (3Q)", "structural_zero (4Q)")
+out = out %>% 
+  filter(q.global < alpha) %>%
+  arrange(q.global, taxon_id)
+write_csv(out, "../outputs/abundance/direct_EPB.csv")
+
+p_EPB = obj$p_bar +
+  labs(title = label) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+# PPB
+adj_formula = paste("PBP", cov_formula, sep = " + ")
+group = "PBP"
+label = "PPB"
+obj = multi_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                           zero_cut, lib_cut, neg_lb, alpha, dunnett)
+out = obj$out
+colnames(out) = c("taxon_id", 
+                  "LFC (2Q - 1Q)", "LFC (3Q - 1Q)", "LFC (4Q - 1Q)", 
+                  "SE (2Q - 1Q)", "SE (3Q - 1Q)", "SE (4Q - 1Q)",
+                  "W (2Q - 1Q)", "W (3Q - 1Q)", "W (4Q - 1Q)",
+                  "p (2Q - 1Q)", "p (3Q - 1Q)", "p (4Q - 1Q)",
+                  "q (2Q - 1Q)", "q (3Q - 1Q)", "q (4Q - 1Q)",
+                  "W.global", "p.global", "q.global",
+                  "structural_zero (1Q)", "structural_zero (2Q)",
+                  "structural_zero (3Q)", "structural_zero (4Q)")
+out = out %>% 
+  filter(q.global < alpha) %>%
+  arrange(q.global, taxon_id)
+write_csv(out, "../outputs/abundance/direct_PPB.csv")
+
+p_PPB = obj$p_bar +
+  labs(title = label) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+# BPA
+adj_formula = paste("BPA", cov_formula, sep = " + ")
+group = "BPA"
+label = "BPA"
+obj = multi_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                           zero_cut, lib_cut, neg_lb, alpha, dunnett)
+out = obj$out
+colnames(out) = c("taxon_id", 
+                  "LFC (2Q - 1Q)", "LFC (3Q - 1Q)", "LFC (4Q - 1Q)", 
+                  "SE (2Q - 1Q)", "SE (3Q - 1Q)", "SE (4Q - 1Q)",
+                  "W (2Q - 1Q)", "W (3Q - 1Q)", "W (4Q - 1Q)",
+                  "p (2Q - 1Q)", "p (3Q - 1Q)", "p (4Q - 1Q)",
+                  "q (2Q - 1Q)", "q (3Q - 1Q)", "q (4Q - 1Q)",
+                  "W.global", "p.global", "q.global",
+                  "structural_zero (1Q)", "structural_zero (2Q)",
+                  "structural_zero (3Q)", "structural_zero (4Q)")
+out = out %>% 
+  filter(q.global < alpha) %>%
+  arrange(q.global, taxon_id)
+write_csv(out, "../outputs/abundance/direct_BPA.csv")
+
+p_BPA = obj$p_bar +
+  labs(title = label) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+# DCP24
+adj_formula = paste("DCP24", cov_formula, sep = " + ")
+group = "DCP24"
+label = "2,4-DCP"
+obj = multi_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                           zero_cut, lib_cut, neg_lb, alpha, dunnett)
+out = obj$out
+colnames(out) = c("taxon_id", 
+                  "LFC (2Q - 1Q)", "LFC (3Q - 1Q)", "LFC (4Q - 1Q)", 
+                  "SE (2Q - 1Q)", "SE (3Q - 1Q)", "SE (4Q - 1Q)",
+                  "W (2Q - 1Q)", "W (3Q - 1Q)", "W (4Q - 1Q)",
+                  "p (2Q - 1Q)", "p (3Q - 1Q)", "p (4Q - 1Q)",
+                  "q (2Q - 1Q)", "q (3Q - 1Q)", "q (4Q - 1Q)",
+                  "W.global", "p.global", "q.global",
+                  "structural_zero (1Q)", "structural_zero (2Q)",
+                  "structural_zero (3Q)", "structural_zero (4Q)")
+out = out %>% 
+  filter(q.global < alpha) %>%
+  arrange(q.global, taxon_id)
+write_csv(out, "../outputs/abundance/direct_DCP24.csv")
+
+p_DCP24 = obj$p_bar +
+  labs(title = label) +
+  theme(plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+# BPB
+adj_formula = paste("B_PB", cov_formula, sep = " + ")
+group = "B_PB"
+label = "BPB"
+obj = two_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                         zero_cut, lib_cut, neg_lb, alpha)
+out = obj$out
+out = out %>%
+  dplyr::select(- matches(paste(strsplit(cov_formula, " \\+ ")[[1]], 
+                                collapse = "|")))
+colnames(out) = c("taxon_id", "LFC (above LOD - below LOD)", 
+                  "SE", "W", "p", "q", 
+                  "structural_zero (below LOD)", 
+                  "structural_zero (above LOD)")
+out = out %>%
+  filter(p < alpha) %>%
+  arrange(q, taxon_id)
+write_csv(out, "../outputs/abundance/two_group_BPB.csv")
+
+p_BPB = obj$p_waterfall +
+        labs(title = label) +
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+
+# TCC
+adj_formula = paste("TCC", cov_formula, sep = " + ")
+group = "TCC"
+label = "TCC"
+obj = two_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                         zero_cut, lib_cut, neg_lb, alpha)
+out = obj$out
+out = out %>%
+  dplyr::select(- matches(paste(strsplit(cov_formula, " \\+ ")[[1]], 
+                                collapse = "|")))
+colnames(out) = c("taxon_id", "LFC (above LOD - below LOD)", 
+                  "SE", "W", "p", "q", 
+                  "structural_zero (below LOD)", 
+                  "structural_zero (above LOD)")
+out = out %>%
+  filter(p < alpha) %>%
+  arrange(q, taxon_id)
+write_csv(out, "../outputs/abundance/two_group_TCC.csv")
+
+p_TCC = obj$p_waterfall +
+        labs(title = label) +
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+
+# Output
+p_diff1 = ggarrange(p_EPB, p_PPB, p_BPA, p_DCP24,
+                    labels = c("A", "B", "C", "D"),
+                    ncol = 2, nrow = 2, align = "v",
+                    common.legend = TRUE, legend = "bottom")
+p_diff2 = ggarrange(p_BPB, p_TCC,
+                    labels = c("E", "F"),
+                    ncol = 2, nrow = 1, align = "v",
+                    common.legend = TRUE, legend = "bottom")
+
+p_diff = ggarrange(p_diff1, p_diff2, align = "v", ncol = 1, nrow = 2, heights = c(1.5, 1))
+print(p_diff)
+ggsave(filename = "../figures/main figures/abundance/ancombc.jpeg", plot = p_diff,
+       height = 12, width = 10, units = 'in', dpi = 300)
+ggsave(filename = "../figures/main figures/abundance/ancombc.pdf", plot = p_diff,
+       height = 12, width = 10)
+```
+
+5. The remaining chemicals do not have differentially abundant genera.
+
+```{r, eval=FALSE}
+main_var_list = c("BP3", "BPF", "BPS", "MPB", "parabensum", "DCP25", "TCS")
+labels = c("BP3", "BPF", "BPS", "MPB", "Combined Parabens", "2,5-DCP", "TCS")
+tab_path = "../outputs/abundance/"
+img_path = "../figures/supplementary figures/abundance/"
+
+for (i in main_var_list) {
+  adj_formula = paste(i, cov_formula, sep = " + ")
+  group = i
+  n_level = nlevels(meta(pseq)[, i])
+  label = labels[which(main_var_list == i)]
+  
+  cat("\n \n \n")
+  
+  if (n_level > 2) {
+    # ======================= Directional test =================================
+    obj = multi_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                               zero_cut, lib_cut, neg_lb, alpha, dunnett)
+    out = obj$out
+    colnames(out) = c("taxon_id", 
+                      "LFC (2Q - 1Q)", "LFC (3Q - 1Q)", "LFC (4Q - 1Q)", 
+                      "SE (2Q - 1Q)", "SE (3Q - 1Q)", "SE (4Q - 1Q)",
+                      "W (2Q - 1Q)", "W (3Q - 1Q)", "W (4Q - 1Q)",
+                      "p (2Q - 1Q)", "p (3Q - 1Q)", "p (4Q - 1Q)",
+                      "q (2Q - 1Q)", "q (3Q - 1Q)", "q (4Q - 1Q)",
+                      "W.global", "p.global", "q.global",
+                      "structural_zero (1Q)", "structural_zero (2Q)",
+                      "structural_zero (3Q)", "structural_zero (4Q)")
+    out = out %>% 
+      filter(q.global < alpha) %>%
+      arrange(q.global, taxon_id)
+    write_csv(out, paste0(tab_path, "direct_", i, ".csv"))
+    
+    # Bar plot
+    if (!is.null(obj$p_bar)) {
+      p_bar = obj$p_bar +
+        labs(title = label) +
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+      
+      print(p_bar)
+      
+      ggsave(paste0(img_path, "direct_bar_", i, ".jpeg"), plot = p_bar,
+             height = 8, width = 6, units='in', dpi = 300)
+      ggsave(paste0(img_path, "direct_bar_", i, ".pdf"), plot = p_bar,
+             height = 8, width = 6)
+    }
+  } else {
+    obj = two_group_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                             zero_cut, lib_cut, neg_lb, alpha)
+    df_out = obj$out
+    df_out = df_out %>%
+      dplyr::select(- matches(paste(strsplit(cov_formula, " \\+ ")[[1]], 
+                                    collapse = "|")))
+    colnames(df_out) = c("taxon_id", "LFC (above LOD - below LOD)", 
+                          "SE", "W", "p", "q", 
+                          "structural_zero (below LOD)", 
+                          "structural_zero (above LOD)")
+    df_out = df_out %>%
+      filter(p < alpha) %>%
+      arrange(q, taxon_id)
+    write_csv(df_out, paste0(tab_path, "two_group_", i, ".csv"))
+    
+    # Waterfall plot
+    if (!is.null(obj$p_waterfall)){
+      p_waterfall = obj$p_waterfall +
+        labs(title = label) +
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+      
+      print(p_waterfall)
+    
+      ggsave(paste0(img_path, "two_group_", i, ".jpeg"), plot = p_waterfall,
+             height = 5, width = 10, units='in', dpi = 300)
+      ggsave(paste0(img_path, "two_group_", i, ".pdf"), plot = p_waterfall,
+             height = 5, width = 10)
+    }
+  }
+}
+```
+
+# 2. Supplementary figures
+
+1. For the adult population.
+
+2. Focus on trend test at genus level.
+
+3. P-values were adjusted by BH procedure.
+
+```{r, results='asis'}
+main_var_list = c("BPA", "BPS", "PBP", "MPB", "parabensum", "EPB",
+                  "DCP24", "BP3", "BPF", "DCP25", "B_PB", "TCC", "TCS")
+labels = c("BPA", "BPS", "PPB", "MPB", "Combined Parabens", "EPB",  
+           "2,4-DCP", "BP3", "BPF", "2,5-DCP", "BPB", "TCC", "TCS")
+tab_path = "../outputs/abundance/"
+img_path = "../figures/supplementary figures/abundance/"
+
+for (i in main_var_list) {
+  adj_formula = paste(i, cov_formula, sep = " + ")
+  group = i
+  n_level = nlevels(meta(pseq)[, i])
+  label = labels[which(main_var_list == i)]
+  
+  cat("\n \n \n")
+  
+  if (n_level > 2) {
+    # ======================= Trend test =================================
+    set.seed(1234)
+    obj = trend_pipeline(pseq, sample_id, adj_formula, group, p_adj_method, 
+                         zero_cut, lib_cut, neg_lb, alpha, dunnett, pattern)
+    out = obj$out
+    colnames(out) = c("taxon_id", 
+                      "LFC (1Q)", "LFC (2Q)", "LFC (3Q)", "LFC (4Q)",
+                      "W", "p", "q", "pattern",
+                      "structural_zero (1Q)", "structural_zero (2Q)",
+                      "structural_zero (3Q)", "structural_zero (4Q)")
+    out = out %>% 
+      filter(q < alpha) %>%
+      arrange(q, taxon_id)
+    write_csv(out, paste0(tab_path, "trend_", i, ".csv"))
+    
+    # Bar plot
+    if (!is.null(obj$p_bar)) {
+      p_bar = obj$p_bar +
+        labs(title = label) +
+        theme(plot.title = element_text(hjust = 0.5),
+              plot.subtitle = element_text(hjust = 0.5))
+      
+      print(p_bar)
+      
+      ggsave(paste0(img_path, "trend_", i, ".jpeg"), plot = p_bar,
+             height = 8, width = 6, units='in', dpi = 300)
+      ggsave(paste0(img_path, "trend_", i, ".pdf"), plot = p_bar,
+             height = 8, width = 6)
+    }
+  }
+}
+```
+
+# Session information
+
+```{r, message_group=FALSE, warning=FALSE, comment=NA}
+sessionInfo()
+```
+

@@ -1,0 +1,305 @@
+---
+title: "Data Overview"
+author: 
+  - Huang Lin$^1$
+  - $^1$NICHD, 6710B Rockledge Drive, Bethesda, MD 20892
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+# rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, 
+                      message = FALSE, comment = NA,
+                      fig.width = 6.25, fig.height = 5)
+
+library(readr)
+library(openxlsx)
+library(tidyverse) 
+library(microbiome)
+library(DT)
+library(magrittr)
+library(qwraps2)
+
+options(qwraps2_markup = "markdown",
+        qwraps2_frmt_digits = 2)
+```
+
+```{r data}
+# OTU table
+otu_table = read_tsv("../data/table-l7.txt", skip = 1)
+otu_table = otu_table %>% 
+  dplyr::select(-taxonomy)
+otu_id = otu_table$`#OTU ID`
+otu_table = data.frame(otu_table[, -1], check.names = FALSE)
+rownames(otu_table) = otu_id
+
+# Taxonomy table
+tax = data.frame(Taxon = otu_id)
+rownames(tax) = otu_id
+tax = tax %>%
+  separate(col = Taxon, 
+           into = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+           sep = ";")
+for (i in 1:ncol(tax)) {
+  tax[, i] = sapply(tax[, i], function(x) str_split(x, "__")[[1]][2])
+}
+tax = as.matrix(tax)
+tax[tax == ""] = NA
+
+# Meta data
+meta_data = read.xlsx("../data/metadata.xlsx", sheet = 1, colNames = TRUE)
+meta_data = meta_data %>%
+  transmute(sampleid = Sample.ID, gender = gender, antibiotics,
+            age = as.numeric(AGE), 
+            age_group = ifelse(adult == 0, "Adolescent", "Adult"),
+            bmi = as.numeric(cd2o) / (as.numeric(cd1o) / 100)^2,
+            edu = as.character(educationo),
+            time_urine = as.numeric(time_urine), batch = New2019, smoke = smoke,
+            DCP24_SG = as.numeric(DCP24_SG),
+            BP3_SG = as.numeric(BP3_SG), BPA_SG = as.numeric(BPA_SG),
+            BPF_SG = as.numeric(BPF_SG), BPS_SG = as.numeric(BPS_SG),
+            EPB_SG = as.numeric(EPB_SG), PBP_SG = as.numeric(PBP_SG),
+            MPB_SG = as.numeric(MPB_SG), parabensum_SG = as.numeric(parabensum_mol),
+            DCP25 = ifelse(belowDCP25 == 0, "Above LOD", "Below LOD"),
+            B_PB = ifelse(belowB_PB == 0, "Above LOD", "Below LOD"), 
+            TCC = ifelse(belowTCC == 0, "Above LOD", "Below LOD"),
+            TCS = ifelse(belowTCS == 0, "Above LOD", "Below LOD"))
+rownames(meta_data) = meta_data$sampleid
+meta_data$gender = recode(meta_data$gender, 'female' = "Female", `male` = "Male")
+meta_data$DCP25 = factor(meta_data$DCP25, levels = c("Below LOD", "Above LOD"))
+meta_data$B_PB = factor(meta_data$B_PB, levels = c("Below LOD", "Above LOD"))
+meta_data$TCC = factor(meta_data$TCC, levels = c("Below LOD", "Above LOD"))
+meta_data$TCS = factor(meta_data$TCS, levels = c("Below LOD", "Above LOD"))
+
+# Combine them into a phyloseq object
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+META = sample_data(meta_data)
+TAX = tax_table(tax)
+otu_data = phyloseq(OTU, TAX, META)
+# Exclude all participants who have used antibiotics in the last four weeks
+otu_data = subset_samples(otu_data, antibiotics != "last4weeks")
+
+# Split by age
+otu_data1 = subset_samples(otu_data, age_group == "Adult")
+otu_data2 = subset_samples(otu_data, age_group == "Adolescent")
+
+# Adults
+meta_data1 = meta(otu_data1)
+meta_data1 = meta_data1 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data1) = meta_data1$sampleid
+meta_data1 = meta_data1 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data1 = phyloseq(otu_table(otu_data1), 
+                     tax_table(otu_data1), 
+                     sample_data(meta_data1))
+
+# Adolescents
+meta_data2 = meta(otu_data2)
+meta_data2 = meta_data2 %>%
+  mutate(DCP24 = cut(DCP24_SG, quantile(DCP24_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BP3 = cut(BP3_SG, quantile(BP3_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPA = cut(BPA_SG, quantile(BPA_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPF = cut(BPF_SG, quantile(BPF_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         BPS = cut(BPS_SG, quantile(BPS_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         EPB = cut(EPB_SG, quantile(EPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         PBP = cut(PBP_SG, quantile(PBP_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         MPB = cut(MPB_SG, quantile(MPB_SG, seq(0, 1, 0.25), na.rm = TRUE), labels = 0:3),
+         parabensum = cut(parabensum_SG, quantile(parabensum_SG, seq(0, 1, 0.25), 
+                                                  na.rm = TRUE), labels = 0:3))
+rownames(meta_data2) = meta_data2$sampleid
+meta_data2 = meta_data2 %>%
+  mutate_if(is.numeric, function(x) round(x, 2))
+
+otu_data2 = phyloseq(otu_table(otu_data2), 
+                     tax_table(otu_data2), 
+                     sample_data(meta_data2))
+```
+
+# 1. Data summary
+
+For the adult population.
+
+```{r summary}
+summary_template =
+  list("Age" =
+         list("min" = ~ min(age, na.rm = TRUE),
+              "max" = ~ max(age, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(age, na_rm = TRUE, show_n = "never")),
+       "BMI" =
+         list("min" = ~ min(bmi, na.rm = TRUE),
+              "max" = ~ max(bmi, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(bmi, na_rm = TRUE, show_n = "never")),
+       "Batch" =
+         list("Old" = ~ n_perc0(batch=="0", na_rm = TRUE),
+              "New" = ~ n_perc0(batch=="1", na_rm = TRUE),
+              "NA" = ~ n_perc0(batch=="unknown", na_rm = TRUE)),
+       "Smoking" =
+         list("Never" = ~ n_perc0(smoke=="0", na_rm = TRUE),
+              "Previous" = ~ n_perc0(smoke=="1", na_rm = TRUE),
+              "Current" = ~ n_perc0(smoke=="2", na_rm = TRUE),
+              "NA" = ~ n_perc0(smoke=="unknown", na_rm = TRUE)),
+       "Education" =
+         list("Primary" = ~ n_perc0(edu=="1", na_rm = TRUE),
+              "Secondary" = ~ n_perc0(edu=="2", na_rm = TRUE),
+              "Tertiary" = ~ n_perc0(edu=="3", na_rm = TRUE),
+              "NA" = ~ n_perc0(edu=="unknown", na_rm = TRUE)),
+       "EPB" =
+         list("min" = ~ min(EPB_SG, na.rm = TRUE),
+              "max" = ~ max(EPB_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(EPB_SG, na_rm = TRUE, show_n = "never")),
+       "PPB" =
+         list("min" = ~ min(PBP_SG, na.rm = TRUE),
+              "max" = ~ max(PBP_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(PBP_SG, na_rm = TRUE, show_n = "never")),
+       "MPB" =
+         list("min" = ~ min(MPB_SG, na.rm = TRUE),
+              "max" = ~ max(MPB_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(MPB_SG, na_rm = TRUE, show_n = "never")),
+       "BPB" =
+         list("Below LOD" = ~ n_perc0(B_PB=="Below LOD", na_rm = TRUE),
+              "Above LOD" = ~ n_perc0(B_PB=="Above LOD", na_rm = TRUE),
+              "NA" = ~ n_perc0(B_PB=="unknown", na_rm = TRUE)),
+       "Molar sum of parabens" =
+         list("min" = ~ min(parabensum_SG, na.rm = TRUE),
+              "max" = ~ max(parabensum_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(parabensum_SG, 
+                                               na_rm = TRUE, show_n = "never")),
+       "BP3" =
+         list("min" = ~ min(BP3_SG, na.rm = TRUE),
+              "max" = ~ max(BP3_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(BP3_SG, na_rm = TRUE, show_n = "never")),
+       "BPA" =
+         list("min" = ~ min(BPA_SG, na.rm = TRUE),
+              "max" = ~ max(BPA_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(BPA_SG, na_rm = TRUE, show_n = "never")),
+       "BPF" =
+         list("min" = ~ min(BPF_SG, na.rm = TRUE),
+              "max" = ~ max(BPF_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(BPF_SG, na_rm = TRUE, show_n = "never")),
+       "BPS" =
+         list("min" = ~ min(BPS_SG, na.rm = TRUE),
+              "max" = ~ max(BPS_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(BPS_SG, na_rm = TRUE, show_n = "never")),
+       "2,4-DCP" =
+         list("min" = ~ min(DCP24_SG, na.rm = TRUE),
+              "max" = ~ max(DCP24_SG, na.rm = TRUE),
+              "mean (sd)" = ~ qwraps2::mean_sd(DCP24_SG, na_rm = TRUE, show_n = "never")),
+       "2,5-DCP" =
+         list("Below LOD" = ~ n_perc0(DCP25 == "Below LOD", na_rm = TRUE),
+              "Above LOD" = ~ n_perc0(DCP25 == "Above LOD", na_rm = TRUE),
+              "NA" = ~ n_perc0(DCP25 == "unknown", na_rm = TRUE)),
+       "TCC" =
+         list("Below LOD" = ~ n_perc0(TCC == "Below LOD", na_rm = TRUE),
+              "Above LOD" = ~ n_perc0(TCC == "Above LOD", na_rm = TRUE),
+              "NA" = ~ n_perc0(TCC == "unknown", na_rm = TRUE)),
+       "TCS" =
+         list("Below LOD" = ~ n_perc0(TCS == "Below LOD", na_rm = TRUE),
+              "Above LOD" = ~ n_perc0(TCS == "Above LOD", na_rm = TRUE),
+              "NA" = ~ n_perc0(TCS == "unknown", na_rm = TRUE))
+  )
+```
+
+```{r, results='asis'}
+meta_data1$DCP25 = as.character(meta_data1$DCP25)
+meta_data1$B_PB = as.character(meta_data1$B_PB)
+meta_data1$TCC = as.character(meta_data1$TCC)
+meta_data1$TCS = as.character(meta_data1$TCS)
+meta_data1 = meta_data1 %>% 
+  transmute(gender, age, bmi, batch, smoke, edu,
+            DCP24_SG, BP3_SG, BPA_SG, BPF_SG, 
+            BPS_SG, EPB_SG, PBP_SG, MPB_SG, parabensum_SG, 
+            DCP25, B_PB, TCC, TCS) %>%
+  replace_na(list(gender = "unknown", DCP25 = "unknown", 
+                  batch = "unknown", smoke = "unknown", edu = "unknown",
+                  B_PB = "unknown", TCC = "unknown", TCS = "unknown"))
+
+whole = summary_table(meta_data1, summary_template)
+by_gender = summary_table(group_by(meta_data1, gender), summary_template)
+both = cbind(whole, by_gender)
+both
+```
+
+# 2. Microbial Composition Overview
+
+## 2.1 Phylum Level
+
+For the adult population.
+
+```{r}
+phylum_data1 = aggregate_taxa(otu_data1, "Phylum")
+
+df = data.frame(phylum = taxa_names(phylum_data1), 
+                value = taxa_sums(phylum_data1)) %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         perc = paste0(prop, "%"), 
+         label = ifelse(prop < 1, NA, perc),
+         phylum = paste0(phylum, " (", perc, ")"))
+out = df %>% 
+  transmute(Phylum = phylum, Percentage = perc)
+datatable(out)
+write_csv(out, "../outputs/overview/phylum_comp.csv")
+
+# Colorblind-friendly palette
+safe_colorblind_palette = c("#88CCEE", "#CC6677", "#DDCC77", "#117733", 
+                            "#332288", "#AA4499", "#44AA99", "#999933", 
+                            "#882255", "#661100", "#6699CC", "#888888")
+# scales::show_col(safe_colorblind_palette)
+
+p = df %>%
+  ggplot(aes(x = "", y = value, fill = phylum)) +
+  geom_col(position = "stack", width = 1, color = "black") +
+  geom_text(aes(label = label, x = 1.3),
+            position = position_stack(vjust = 0.5)) +
+  coord_polar("y", start = 0) +
+  labs(title = "Microbial Composition at Phylum Level") +
+  scale_fill_manual(name = NULL, values = safe_colorblind_palette) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+print(p)
+
+ggsave("../figures/main figures/overview/phylum_comp.jpeg", 
+       height = 7, width = 8, units = 'in', dpi = 300)
+ggsave("../figures/main figures/overview/phylum_comp.pdf", height = 7, width = 8)
+```
+
+## 2.2 Genus Level
+
+For the adult population.
+
+```{r}
+genus_data1 = aggregate_taxa(otu_data1, "Genus")
+
+df = data.frame(genus = taxa_names(genus_data1), 
+                phylum = as(tax_table(genus_data1), "matrix")[, "Phylum"], 
+                value = taxa_sums(genus_data1)) %>%
+  mutate(prop = round(value / sum(value) * 100, 1),
+         perc = paste0(prop, "%"), 
+         label = ifelse(prop < 1, NA, perc),
+         genus = paste0(genus, " (", perc, ")"))
+out = df %>% 
+  transmute(Genus = genus, Phylum = phylum, Percentage = perc)
+datatable(out)
+write_csv(out, "../outputs/overview/genus_comp.csv")
+```
+
+# Session information
+
+```{r, message_group=FALSE, warning=FALSE, comment=NA}
+sessionInfo()
+```
+
